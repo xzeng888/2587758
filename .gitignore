@@ -1,160 +1,149 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+import random
+from multiprocessing import Process, Queue
 
-# C extensions
-*.so
+# 计算牌面点数
+def calculate_count(cards):
+    count = 0
+    for card in cards:
+        if card == 1 or card == 2:
+            count += 1
+        elif card == 3:
+            count += 2
+        elif card == 4:
+            count += 3
+        elif card == 5 or card == 6 or card == 7:
+            count -= 2
+        elif card == 8:
+            count -= 1
+    return count
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+# 随机模拟游戏结果
+def simulate_game_result(player_cards, banker_cards):
+    player_count = calculate_count(player_cards)
+    banker_count = calculate_count(banker_cards)
+    if player_count > banker_count:
+        return "player"
+    elif banker_count > player_count:
+        return "banker"
+    else:
+        return "tie"
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+# 计算胜率
+def calculate_winning_rate(cards, total_simulations):
+    player_wins = 0
+    banker_wins = 0
+    ties = 0
+    for i in range(total_simulations):
+        remaining_cards = [1, 2, 3, 4, 5, 6, 7, 8] * 32
+        random.shuffle(remaining_cards)
+        for card in cards:
+            remaining_cards.remove(card)
+        player_cards = [remaining_cards.pop() for i in range(2)]
+        banker_cards = [remaining_cards.pop() for i in range(2)]
+        result = simulate_game_result(player_cards, banker_cards)
+        if result == "player":
+            player_wins += 1
+        elif result == "banker":
+            banker_wins += 1
+        else:
+            ties += 1
+    player_winning_rate = player_wins / total_simulations
+    banker_winning_rate = banker_wins / total_simulations
+    tie_rate = ties / total_simulations
+    return player_winning_rate, banker_winning_rate, tie_rate
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+# 计算真实计数
+def calculate_true_count(remaining_cards):
+    count = 0
+    for card in remaining_cards:
+        if card == 1 or card == 2:
+            count += 1
+        elif card == 3:
+            count += 2
+        elif card == 4:
+            count += 3
+        elif card == 5 or card == 6 or card == 7:
+            count -= 2
+        elif card == 8:
+            count -= 1
+    num_decks = len(remaining_cards) / 52
+    true_count = count / (len(remaining_cards) / 52 / num_decks * 2)
+    return true_count
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
+# 计算期望值（加入重要性采样和控制变量法）
+def calculate_expected_value(player_winning_rate, banker_winning_rate, tie_rate, true_count, control_variate):
+    c = -1 * control_variate
+    u_player = player_winning_rate - control_variate * true_count
+    u_banker = banker_winning_rate - control_variate * true_count
+    player_ev = (player_winning_rate * 1 - u_player * c) + (tie_rate * 0.95 - true_count * c) - (banker_winning_rate * 1.05 - u_banker * c)
+    banker_ev = (banker_winning_rate * 0.95 - u_banker * c) + (tie_rate * 0.95 - true_count * c) - (player_winning_rate * 1.05 - u_player * c)
+    return player_ev, banker_ev
 
-# Translations
-*.mo
-*.pot
+# 分布式计算任务
+def task_worker(task_queue, result_queue, control_variate):
+    while not task_queue.empty():
+        task = task_queue.get()
+        player_winning_rate, banker_winning_rate, tie_rate = calculate_winning_rate(task["cards"], task["total_simulations"])
+        true_count = calculate_true_count(task["remaining_cards"])
+        player_ev, banker_ev = calculate_expected_value(player_winning_rate, banker_winning_rate, tie_rate, true_count, control_variate)
+        result_queue.put((player_winning_rate, banker_winning_rate, tie_rate, true_count, player_ev, banker_ev))
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+# 分布式执行
+def distribute_execute(cards, control_variate):
+    total_simulations = 100000
+    num_tasks = 4 # 使用4个任务进行并行计算
+    task_queue = Queue()
+    result_queue = Queue()
+    remaining_cards = [1, 2, 3, 4, 5, 6, 7, 8] * 32
+    for card in cards:
+        remaining_cards.remove(card)
+    step = len(remaining_cards) // num_tasks # 分配任务
+    for i in range(num_tasks):
+        task = {
+            "cards": cards,
+            "total_simulations": total_simulations // num_tasks,
+            "remaining_cards": remaining_cards[i*step : (i+1)*step]
+        }
+        task_queue.put(task)
+    workers = [Process(target=task_worker, args=(task_queue, result_queue, control_variate)) for i in range(num_tasks)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    player_winning_rate = 0
+    banker_winning_rate = 0
+    tie_rate = 0
+    true_count = 0
+    player_ev = 0
+    banker_ev = 0
+    while not result_queue.empty(): # 合并结果
+        res = result_queue.get()
+        player_winning_rate += res[0]
+        banker_winning_rate += res[1]
+        tie_rate += res[2]
+        true_count += res[3]
+        player_ev += res[4]
+        banker_ev += res[5]
+    player_winning_rate /= num_tasks
+    banker_winning_rate /= num_tasks
+    tie_rate /= num_tasks
+    true_count /= num_tasks
+    player_ev /= num_tasks
+    banker_ev /= num_tasks
+    return player_winning_rate, banker_winning_rate, tie_rate, true_count, player_ev, banker_ev
 
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
-
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
-#   https://pdm.fming.dev/#use-with-ide
-.pdm.toml
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
+# 主函数
+if __name__ == "__main__":
+    while True:
+        input_str = input("Enter the cards that have been drawn (e.g. 235): ")
+        if not input_str:
+            break
+        cards = [int(x) for x in input_str]
+        control_variate = 0.95 # 控制变量法中的辅助变量（一般取近似的理论值）
+        player_winning_rate, banker_winning_rate, tie_rate, true_count, player_ev, banker_ev = distribute_execute(cards, control_variate)
+        print("Player winning rate: {:.2f}%".format(player_winning_rate * 100))
+        print("Banker winning rate: {:.2f}%".format(banker_winning_rate * 100))
+        print("Tie rate: {:.2f}%".format(tie_rate * 100))
+        print("True count: {:.2f}".format(true_count))
+        print("Player expected value: {:.2f}".format(player_ev))
+        print("Banker expected value: {:.2f}\n".format(banker_ev)) 
